@@ -147,27 +147,40 @@ Always be:
 Context from HR Documents:
 {context}"""
 
+def extract_message_text(content):
+    """Extract plain text from Gradio 6.x content format."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list) and len(content) > 0:
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                return part.get("text", "")
+            if isinstance(part, str):
+                return part
+    return str(content) if content else ""
+
 def generate_response(query, context, chat_history):
     """Generate a response using the LLM with context."""
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT.format(context=context)}
     ]
-    
-    # Add chat history (tuple format: [(user, bot), ...])
-    for user_msg, bot_msg in chat_history:
-        messages.append({"role": "user", "content": user_msg})
-        if bot_msg:
-            messages.append({"role": "assistant", "content": bot_msg})
-    
+
+    # Add chat history (extract text from Gradio 6.x format)
+    for msg in chat_history:
+        role = msg.get("role")
+        content = extract_message_text(msg.get("content", ""))
+        if role in ("user", "assistant") and content:
+            messages.append({"role": role, "content": content})
+
     # Add current query
     messages.append({"role": "user", "content": query})
-    
+
     response = client.chat.completions.create(
         model=LLM_MODEL,
         messages=messages,
         temperature=TEMPERATURE
     )
-    
+
     return response.choices[0].message.content or ""
 
 def generate_response_streaming(query, context, chat_history):
@@ -175,23 +188,24 @@ def generate_response_streaming(query, context, chat_history):
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT.format(context=context)}
     ]
-    
-    # Add chat history (tuple format: [(user, bot), ...])
-    for user_msg, bot_msg in chat_history:
-        messages.append({"role": "user", "content": user_msg})
-        if bot_msg:
-            messages.append({"role": "assistant", "content": bot_msg})
-    
+
+    # Add chat history (extract text from Gradio 6.x format)
+    for msg in chat_history:
+        role = msg.get("role")
+        content = extract_message_text(msg.get("content", ""))
+        if role in ("user", "assistant") and content:
+            messages.append({"role": role, "content": content})
+
     # Add current query
     messages.append({"role": "user", "content": query})
-    
+
     stream = client.chat.completions.create(
         model=LLM_MODEL,
         messages=messages,
         temperature=TEMPERATURE,
         stream=True
     )
-    
+
     response_text = ""
     for chunk in stream:
         if chunk.choices and chunk.choices[0].delta.content:
@@ -233,7 +247,7 @@ def initialize_system():
     return vector_store
 
 # ============================================================================
-# GRADIO INTERFACE (Using tuple format - most compatible)
+# GRADIO INTERFACE (Using Gradio 6.x dict format)
 # ============================================================================
 
 def create_chat_interface(vector_store):
@@ -243,26 +257,36 @@ def create_chat_interface(vector_store):
         """Handle user input - add to history immediately."""
         if not message.strip():
             return "", history
-        return "", history + [[message, None]]
+        # Gradio 6.x dict format: {"role": "user/assistant", "content": "..."}
+        return "", history + [{"role": "user", "content": message}]
     
     def bot_response(history):
         """Generate bot response with streaming."""
-        if not history or history[-1][1] is not None:
+        # Check if history is empty or last message is not from user
+        if not history or history[-1].get("role") != "user":
             yield history
             return
-        
-        user_message = history[-1][0]
-        
+
+        # Extract text from Gradio 6.x content format
+        user_message = extract_message_text(history[-1].get("content", ""))
+
         try:
             context = get_relevant_context(user_message, vector_store)
-            
+
+            # Add empty assistant message for streaming
+            history = history + [{"role": "assistant", "content": ""}]
+
             # Stream the response
-            for partial in generate_response_streaming(user_message, context, history[:-1]):
-                history[-1][1] = partial
+            for partial in generate_response_streaming(user_message, context, history[:-2]):
+                history[-1]["content"] = partial
                 yield history
-                
+
         except Exception as e:
-            history[-1][1] = f"I apologize, but I encountered an error. Please try again. Error: {str(e)}"
+            error_msg = f"I apologize, but I encountered an error. Please try again. Error: {str(e)}"
+            if history and history[-1].get("role") == "assistant":
+                history[-1]["content"] = error_msg
+            else:
+                history = history + [{"role": "assistant", "content": error_msg}]
             yield history
     
     def clear_chat():
@@ -282,7 +306,7 @@ def create_chat_interface(vector_store):
             value=[],
             height=450,
             show_label=False,
-            type="tuples",  # Explicitly use tuple format [[user, bot], ...]
+            # Gradio 6.x uses dict format: [{"role": "user/assistant", "content": "..."}]
         )
         
         with gr.Row():
